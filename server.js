@@ -1,3 +1,6 @@
+// Copyright (C) 2026 xer5xer5
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');

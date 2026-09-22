@@ -1,4 +1,6 @@
-/* Local Web Audio modules.  No audio leaves the browser. */
+// Copyright (C) 2026 xer5xer5
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Local Web Audio modules. No audio leaves the browser.
 class AssistanceAudioEngine {
   constructor({ onPulse } = {}) {
     this.onPulse = onPulse || (() => {});

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
 :root{
   --ink:#17212b;
   --muted:#596673;
@@ -37,7 +38,7 @@ button,input,select,textarea{font:inherit}
 .sidebar{background:var(--nav);padding:14px 10px;display:flex;flex-direction:column;gap:2px}
 .nav{border:0;border-left:3px solid transparent;border-radius:0;background:transparent;color:#d8e0e5;text-align:left;padding:9px 10px;font:inherit;font-size:14px;cursor:pointer}
 .nav:hover{background:var(--nav-hover);color:#fff}.nav.active{background:#314b61;border-left-color:#71b7eb;color:#fff;font-weight:700}
-.sidebar-foot{margin-top:auto;border-top:1px solid #40515f;color:#b9c5ce;font-size:11px;padding:12px 8px 2px;line-height:1.55}
+.sidebar-foot{margin-top:auto;border-top:1px solid #40515f;color:#b9c5ce;font-size:11px;padding:12px 8px 2px;line-height:1.55}.source-links{display:flex;gap:10px;margin-top:7px}.source-links a{color:#d8e0e5;text-decoration:underline;text-underline-offset:2px}.source-links a:hover{color:#fff}
 main{max-width:1220px;width:100%;padding:28px 34px 42px}
 .page{display:none}.page.active{display:block}
 .eyebrow{font-size:12px;font-weight:700;color:var(--blue);margin:0 0 2px;letter-spacing:0;text-transform:none}

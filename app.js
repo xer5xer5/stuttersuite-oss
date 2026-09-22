@@ -1,4 +1,6 @@
-/* StutterSuite local P0 prototype — no network requests, no automatic recording. */
+// Copyright (C) 2026 xer5xer5
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// StutterSuite local P0 prototype — no network requests, no automatic recording.
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const STORE = 'stuttersuite.public.v1';
