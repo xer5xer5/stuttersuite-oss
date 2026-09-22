@@ -46,7 +46,7 @@ h2{font-size:18px;margin:0;line-height:1.35}h3{color:var(--ink)}
 .lead{color:var(--muted);margin:0 0 18px;max-width:760px}
 .warning,.notice{border:1px solid #e2c889;border-left:4px solid var(--amber);background:var(--amber-soft);padding:10px 12px;border-radius:0;margin:16px 0}
 .notice{border-color:#a9cce4;border-left-color:var(--blue);background:#f0f7fc}
-.quick-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.quick-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
 .quick-card,.panel{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:16px;box-shadow:none}
 .quick-card{min-height:172px;display:flex;flex-direction:column;align-items:flex-start}
 .quick-card .icon{font-size:21px;line-height:1;color:var(--blue);margin-bottom:8px}.quick-card h2{font-size:17px}
