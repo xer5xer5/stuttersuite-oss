@@ -1,0 +1,11 @@
+{
+  "name": "stuttersuite-oss",
+  "version": "0.2.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "start": "node server.js --open",
+    "test": "node --test tests/*.test.cjs",
+    "test:browser": "npx --yes --package=electron@44.5.1 electron tests/browser.cjs"
+  }
+}

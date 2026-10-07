@@ -22,7 +22,7 @@
   new MutationObserver(sync).observe($('#assistStatus'), {childList:true,subtree:true,characterData:true});
   new MutationObserver(sync).observe($('#currentPhrase'), {childList:true,subtree:true,characterData:true});
   $('#settingLock').addEventListener('change', (event) => {
-    document.querySelectorAll('#detailsPanel, .module-grid, .rhythm').forEach((section) => section.querySelectorAll('input,select,button').forEach((node) => node.disabled = event.target.checked));
+    document.querySelectorAll('#detailsPanel, .module-grid, .rhythm').forEach((section) => section.querySelectorAll('input,select,button').forEach((node) => node.disabled = event.target.checked || node.dataset.unavailable === 'true'));
     if (event.target.checked) $('#audioMessage').textContent = '詳細設定をロックしました。補助停止と音量はそのまま操作できます。';
   });
 })();
