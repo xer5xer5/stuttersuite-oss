@@ -20,8 +20,18 @@ class AssistanceAudioEngine {
     if (this.starting) return this.starting;
     if (this.running) return {warnings: []};
     const generation = ++this.generation;
-    this.starting = this.startInternal({inputDeviceId, outputDeviceId, settings}, generation);
-    try { return await this.starting; } finally { this.starting = null; }
+    const starting = this.startInternal({inputDeviceId, outputDeviceId, settings}, generation);
+    this.starting = starting;
+    try { return await starting; }
+    finally { if (this.starting === starting) this.starting = null; }
+  }
+
+  checkStart(generation) {
+    if (generation !== this.generation) {
+      const error = new Error('開始を取り消しました。');
+      error.name = 'AbortError';
+      throw error;
+    }
   }
 
   async startInternal({inputDeviceId, outputDeviceId, settings}, generation) {
@@ -30,16 +40,17 @@ class AssistanceAudioEngine {
     const warnings = [];
     try {
       const needsPitch = settings.branches.some(b => b.enabled && b.pitch !== 0);
+      let pitchReady = false;
       if (AssistanceAudioEngine.supportsPitch()) {
         try {
           await context.audioWorklet.addModule('pitch-worklet.js');
-          this.pitchReady = true;
+          pitchReady = true;
         } catch {
-          this.pitchReady = false;
           warnings.push('音程処理を読み込めませんでした。DAFは利用できます。再読み込みするかブラウザ・接続を確認してください。');
         }
       }
-      if (generation !== this.generation) throw Error('開始を取り消しました。');
+      this.checkStart(generation);
+      this.pitchReady = pitchReady;
       if (needsPitch && !this.pitchReady) throw Error('FAFを開始できません。HTTPS接続と対応ブラウザを確認してください。DAFは音程を0にして利用できます。');
       if (typeof context.setSinkId === 'function') {
         try { await context.setSinkId(outputDeviceId === 'default' ? '' : outputDeviceId); }
@@ -47,13 +58,14 @@ class AssistanceAudioEngine {
       } else if (outputDeviceId !== 'default') {
         warnings.push('このブラウザは出力先切替に対応していません。OS／ブラウザの出力をヘッドホンに設定してください。');
       }
+      this.checkStart(generation);
       if (settings.branches.some(b => b.enabled) || settings.direct.enabled) {
         const constraints = {echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1};
         if (inputDeviceId !== 'default') constraints.deviceId = {exact: inputDeviceId};
         const stream = await navigator.mediaDevices.getUserMedia({audio: constraints, video: false});
         if (generation !== this.generation) {
           stream.getTracks().forEach(t => t.stop());
-          throw Error('開始を取り消しました。');
+          this.checkStart(generation);
         }
         this.stream = stream;
         this.source = context.createMediaStreamSource(stream);
@@ -61,7 +73,7 @@ class AssistanceAudioEngine {
           if (this.stream === stream) this.onFault('マイクが切断されたため停止しました。');
         }));
       }
-      if (generation !== this.generation) throw Error('開始を取り消しました。');
+      this.checkStart(generation);
       this.master = context.createGain(); this.master.gain.value = 0;
       const limiter = context.createDynamicsCompressor();
       limiter.threshold.value = -3; limiter.knee.value = 0; limiter.ratio.value = 20;
@@ -71,11 +83,13 @@ class AssistanceAudioEngine {
       ceiling.curve = curve;
       this.master.connect(limiter).connect(ceiling).connect(context.destination);
       await context.resume();
-      if (generation !== this.generation) throw Error('開始を取り消しました。');
+      this.checkStart(generation);
       this.running = true; this.muted = false;
       this.configure(settings); this.setMasterGain(settings.masterGain);
       return {warnings};
     } catch (error) {
+      // A cancelled attempt owns no current session; stop() already released it.
+      this.checkStart(generation);
       await this.stop();
       throw error;
     }
@@ -172,7 +186,8 @@ class AssistanceAudioEngine {
   // Stop releases the microphone, closes the DSP context and drops all buffer owners.
   mute() { return this.stop(); }
   async stop() {
-    this.generation++; this.running = false; this.muted = true;
+    const generation = ++this.generation;
+    this.starting = null; this.running = false; this.muted = true;
     const context = this.context, stream = this.stream;
     if (this.master && context?.state !== 'closed') this.master.gain.setValueAtTime(0, context.currentTime);
     this.stream = null; stream?.getTracks().forEach(t => t.stop());
@@ -180,7 +195,7 @@ class AssistanceAudioEngine {
     this.modules.clear(); this.retired.clear();
     this.context = this.source = this.master = null; this.pitchReady = false;
     if (context && context.state !== 'closed') await context.close();
-    this.muted = false;
+    if (generation === this.generation) this.muted = false;
   }
 }
 function dbToGain(value) { return Math.pow(10, Number(value) / 20); }

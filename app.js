@@ -53,6 +53,7 @@ let audio = new AssistanceAudioEngine({onPulse:()=>{const pulse=$('#pulse');puls
 let activeProfile = data.profiles[0]?.id || 'meeting';
 let activeConditionName = data.profiles[0]?.name || '未選択';
 let sessionConditionSnapshot = null;
+let assistRequest = 0;
 let phraseIndex = 0, speaking = false, trialStep = 0, toastTimer;
 let speechToken = 0, advanceTimer = null;
 
@@ -87,16 +88,17 @@ async function prepareAudio(){
   try{ const device=$('#inputDevice').value; const constraints={audio:device==='default'?true:{deviceId:{exact:device}},video:false}; const stream=await navigator.mediaDevices.getUserMedia(constraints); stream.getTracks().forEach(t=>t.stop()); await enumerateDevices(); $('#audioMessage').textContent='マイクを確認しました。補助はまだ停止中です。'; toast('マイクを確認しました。'); return true;
   }catch(e){ $('#audioMessage').textContent='マイクを使えません。ブラウザの権限・他アプリの利用状況を確認してください。';return false; }
 }
-async function clearAudio(){await audio.stop();}
+async function clearAudio(){assistRequest++;await audio.stop();}
 async function startAssist(){
   if(audio.running||audio.starting)return;if(!navigator.mediaDevices?.getUserMedia){toast('このブラウザではライブ補助を利用できません。');return;}
+  const request=++assistRequest;
   try{
     $('#startAssist').disabled=true;
-    const condition=currentCondition();const result=await audio.start({inputDeviceId:$('#inputDevice').value,outputDeviceId:$('#outputDevice').value,settings:condition});sessionConditionSnapshot=JSON.parse(JSON.stringify(condition));setStatus('assist','running','補助: 動作中');setStatus('mic',audio.stream?'running':'idle',audio.stream?'マイク: 使用中':'マイク: 未使用');syncControls();$('#startAssist').disabled=true;$('#muteAssist').disabled=false;$('#audioMessage').textContent=result.warnings[0]||'補助音をヘッドホンへ再生しています。相手へのミュートではありません。TTSの出力先はOS/ブラウザの設定に従います。';
-  }catch(e){try{await audio.stop();}catch{}sessionConditionSnapshot=null;setStatus('assist','stopped','補助: 停止');setStatus('mic','idle','マイク: 未使用');$('#startAssist').disabled=false;$('#muteAssist').disabled=true;$('#audioMessage').textContent=({NotAllowedError:'マイクを利用できません。ブラウザのサイト設定でマイク許可を確認してください。',NotFoundError:'マイクが見つかりません。接続と入力機器を確認してください。',NotReadableError:'マイクを開けません。他のアプリによる占有や機器の接続を確認してください。'}[e.name])||e.message||'補助を開始できませんでした。マイク権限、ヘッドホン、他アプリの設定を確認してください。';}
+    const condition=currentCondition();const result=await audio.start({inputDeviceId:$('#inputDevice').value,outputDeviceId:$('#outputDevice').value,settings:condition});if(request!==assistRequest)return;sessionConditionSnapshot=JSON.parse(JSON.stringify(condition));setStatus('assist','running','補助: 動作中');setStatus('mic',audio.stream?'running':'idle',audio.stream?'マイク: 使用中':'マイク: 未使用');syncControls();$('#startAssist').disabled=true;$('#muteAssist').disabled=false;$('#audioMessage').textContent=result.warnings[0]||'補助音をヘッドホンへ再生しています。相手へのミュートではありません。TTSの出力先はOS/ブラウザの設定に従います。';
+  }catch(e){if(request!==assistRequest)return;sessionConditionSnapshot=null;setStatus('assist','stopped','補助: 停止');setStatus('mic','idle','マイク: 未使用');$('#startAssist').disabled=false;$('#muteAssist').disabled=true;$('#audioMessage').textContent=({NotAllowedError:'マイクを利用できません。ブラウザのサイト設定でマイク許可を確認してください。',NotFoundError:'マイクが見つかりません。接続と入力機器を確認してください。',NotReadableError:'マイクを開けません。他のアプリによる占有や機器の接続を確認してください。'}[e.name])||e.message||'補助を開始できませんでした。マイク権限、ヘッドホン、他アプリの設定を確認してください。';}
 }
 function refreshAudio(){if(audio.running&&!audio.muted){try{audio.configure(currentCondition());}catch(e){emergencyStop().then(()=>$('#audioMessage').textContent=e.message);}}}
-async function muteAssist(){pausePhrase();await audio.stop();setStatus('assist','stopped','補助: 停止');setStatus('mic','idle','マイク: 未使用');$('#startAssist').disabled=false;$('#muteAssist').disabled=true;$('#audioMessage').textContent='補助音を停止し、マイクを解放しました。通話のマイクは通話アプリ側で操作します。';}
+async function muteAssist(){pausePhrase();await clearAudio();setStatus('assist','stopped','補助: 停止');setStatus('mic','idle','マイク: 未使用');$('#startAssist').disabled=false;$('#muteAssist').disabled=true;$('#audioMessage').textContent='補助音を停止し、マイクを解放しました。通話のマイクは通話アプリ側で操作します。';}
 async function emergencyStop(){pausePhrase();await clearAudio();setStatus('assist','stopped','補助: 停止');setStatus('mic','idle','マイク: 未使用');$('#startAssist').disabled=false;$('#muteAssist').disabled=true;$('#audioMessage').textContent='補助音・マスキング・メトロノーム・TTSを停止し、マイクを解放しました。';toast('補助音を停止しました。');}
 
 function splitPhrases(text){return text.replace(/\r/g,'').split(/(?<=[。！？!?…]|\n)/).map(x=>x.trim()).filter(Boolean).map((text,i)=>({id:`p${Date.now()}-${i}`,text,reading:text}));}

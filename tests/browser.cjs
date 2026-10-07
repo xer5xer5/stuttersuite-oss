@@ -67,6 +67,32 @@ async function run() {
   await execute(`globalThis.modeLateStream=syntheticDestination.stream.clone();finishCapture(modeLateStream);pendingStart;`);
   assert.equal(await execute(`!audio.running&&modeLateStream.getTracks().every(t=>t.readyState==='ended')&&currentCondition().mode==='none'`), true);
 
+  // Restart before an ignored permission request settles. Old success/failure
+  // must release only its own stream and leave the new session and UI intact.
+  for (const outcome of ['resolve', 'reject']) {
+    await execute(`delete globalThis.finishCapture;applyCondition(defaultCondition());navigator.mediaDevices.getUserMedia=()=>new Promise((resolve,reject)=>{globalThis.finishCapture=resolve;globalThis.failCapture=reject;});globalThis.pendingStart=startAssist();void 0;`);
+    await execute(`waitFor(()=>typeof finishCapture==='function')`);
+    await execute(`emergencyStop()`);
+    assert.equal(await execute(`audio.starting===null&&!document.querySelector('#startAssist').disabled`), true);
+    await execute(`document.querySelector('[data-mode="none"]').click();`);
+    await execute(`waitFor(()=>currentCondition().mode==='none')`);
+    await execute(`document.querySelector('#startAssist').click();`);
+    await execute(`waitFor(()=>audio.running&&!audio.starting)`);
+    await execute(`globalThis.replacementContext=audio.context;globalThis.replacementMessage=document.querySelector('#audioMessage').textContent;void 0;`);
+    if (outcome === 'resolve') await execute(`globalThis.restartLateStream=syntheticDestination.stream.clone();finishCapture(restartLateStream);pendingStart;`);
+    else await execute(`failCapture(Object.assign(Error('late permission denial'),{name:'NotAllowedError'}));pendingStart;`);
+    assert.equal(await execute(`audio.running&&audio.context===replacementContext&&!audio.stream&&document.querySelector('#assistStatus').classList.contains('running')&&document.querySelector('#startAssist').disabled&&!document.querySelector('#muteAssist').disabled&&document.querySelector('#audioMessage').textContent===replacementMessage&&sessionConditionSnapshot.mode==='none'`), true, `late ${outcome} must not change the new session UI`);
+    if (outcome === 'resolve') assert.equal(await execute(`restartLateStream.getTracks().every(t=>t.readyState==='ended')`), true);
+    await execute(`emergencyStop()`);
+  }
+
+  // Output selection is also asynchronous: stopping here must not request input.
+  await execute(`globalThis.originalSetSink=AudioContext.prototype.setSinkId;AudioContext.prototype.setSinkId=()=>new Promise(resolve=>globalThis.finishSink=resolve);navigator.mediaDevices.getUserMedia=async()=>{captureCount++;return syntheticDestination.stream.clone();};globalThis.beforeSinkCaptureCount=captureCount;applyCondition(defaultCondition());globalThis.pendingSinkStart=startAssist();void 0;`);
+  await execute(`waitFor(()=>typeof finishSink==='function')`);
+  await execute(`emergencyStop()`);
+  await execute(`AudioContext.prototype.setSinkId=originalSetSink;finishSink();pendingSinkStart;`);
+  assert.equal(await execute(`captureCount===beforeSinkCaptureCount&&!audio.running&&!audio.stream&&audio.context===null&&audio.starting===null&&document.querySelector('#audioMessage').textContent.includes('マイクを解放しました')`), true);
+
   // Missing worklet remains an explicit failure for FAF, while DAF still starts.
   await execute(`navigator.mediaDevices.getUserMedia=async()=>syntheticDestination.stream.clone();globalThis.originalAddModule=AudioWorklet.prototype.addModule;AudioWorklet.prototype.addModule=async()=>{throw Error('test missing worklet');};applyCondition({mode:'faf',branches:[{enabled:true,pitch:-3,delay:0}]});startAssist();`);
   assert.equal(await execute(`!audio.running && document.querySelector('#audioMessage').textContent.includes('FAFを開始できません')`), true);
