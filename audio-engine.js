@@ -1,164 +1,197 @@
 // Copyright (C) 2026 xer5xer5
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Local Web Audio modules. No audio leaves the browser.
+// Microphone -> local DSP -> headphones. No recording, storage or upload path.
 class AssistanceAudioEngine {
-  constructor({ onPulse } = {}) {
+  constructor({onPulse, onFault} = {}) {
     this.onPulse = onPulse || (() => {});
-    this.context = null;
-    this.stream = null;
-    this.source = null;
-    this.master = null;
-    this.limiter = null;
-    this.modules = new Map();
-    this.running = false;
-    this.muted = false;
+    this.onFault = onFault || (() => {});
+    this.context = this.stream = this.source = this.master = null;
+    this.modules = new Map(); this.retired = new Set();
+    this.running = this.muted = false; this.generation = 0;
+    this.starting = null; this.pitchReady = false;
   }
 
-  async start({ inputDeviceId = 'default', outputDeviceId = 'default', settings }) {
-    if (this.running) return { warnings: [] };
+  static supportsPitch() {
+    return !!window.isSecureContext && typeof window.AudioWorkletNode === 'function' &&
+      !!window.AudioContext && 'audioWorklet' in window.AudioContext.prototype;
+  }
+
+  async start({inputDeviceId = 'default', outputDeviceId = 'default', settings}) {
+    if (this.starting) return this.starting;
+    if (this.running) return {warnings: []};
+    const generation = ++this.generation;
+    this.starting = this.startInternal({inputDeviceId, outputDeviceId, settings}, generation);
+    try { return await this.starting; } finally { this.starting = null; }
+  }
+
+  async startInternal({inputDeviceId, outputDeviceId, settings}, generation) {
+    const context = new AudioContext({latencyHint: 'interactive'});
+    this.context = context;
+    const warnings = [];
     try {
-      const audio = inputDeviceId === 'default'
-        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-        : { deviceId: { exact: inputDeviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false };
-      this.stream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
-      this.context = new (window.AudioContext || window.webkitAudioContext)();
-      const warnings = [];
-      if (typeof this.context.setSinkId === 'function') {
-        try { await this.context.setSinkId(outputDeviceId === 'default' ? '' : outputDeviceId); }
-        catch { warnings.push('選択した出力先へ切り替えられませんでした。ブラウザまたはOSの既定出力を確認してください。'); }
-      } else if (outputDeviceId !== 'default') {
-        warnings.push('このブラウザは補助音の出力先切替に対応していません。OSまたはブラウザの既定出力を使います。');
+      const needsPitch = settings.branches.some(b => b.enabled && b.pitch !== 0);
+      if (AssistanceAudioEngine.supportsPitch()) {
+        try {
+          await context.audioWorklet.addModule('pitch-worklet.js');
+          this.pitchReady = true;
+        } catch {
+          this.pitchReady = false;
+          warnings.push('音程処理を読み込めませんでした。DAFは利用できます。再読み込みするかブラウザ・接続を確認してください。');
+        }
       }
-      this.source = this.context.createMediaStreamSource(this.stream);
-      this.master = this.context.createGain();
-      this.master.gain.value = 0;
-      this.limiter = this.context.createDynamicsCompressor();
-      this.limiter.threshold.value = -3;
-      this.limiter.knee.value = 0;
-      this.limiter.ratio.value = 20;
-      this.limiter.attack.value = .003;
-      this.limiter.release.value = .05;
-      this.master.connect(this.limiter).connect(this.context.destination);
-      this.running = true;
-      this.configure(settings);
-      this.setMasterGain(settings.masterGain);
-      return { warnings };
+      if (generation !== this.generation) throw Error('開始を取り消しました。');
+      if (needsPitch && !this.pitchReady) throw Error('FAFを開始できません。HTTPS接続と対応ブラウザを確認してください。DAFは音程を0にして利用できます。');
+      if (typeof context.setSinkId === 'function') {
+        try { await context.setSinkId(outputDeviceId === 'default' ? '' : outputDeviceId); }
+        catch { throw Error('選択した出力先を使えません。ヘッドホンの接続と出力先を確認してください。'); }
+      } else if (outputDeviceId !== 'default') {
+        warnings.push('このブラウザは出力先切替に対応していません。OS／ブラウザの出力をヘッドホンに設定してください。');
+      }
+      if (settings.branches.some(b => b.enabled) || settings.direct.enabled) {
+        const constraints = {echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1};
+        if (inputDeviceId !== 'default') constraints.deviceId = {exact: inputDeviceId};
+        const stream = await navigator.mediaDevices.getUserMedia({audio: constraints, video: false});
+        if (generation !== this.generation) {
+          stream.getTracks().forEach(t => t.stop());
+          throw Error('開始を取り消しました。');
+        }
+        this.stream = stream;
+        this.source = context.createMediaStreamSource(stream);
+        stream.getTracks().forEach(t => t.addEventListener('ended', () => {
+          if (this.stream === stream) this.onFault('マイクが切断されたため停止しました。');
+        }));
+      }
+      if (generation !== this.generation) throw Error('開始を取り消しました。');
+      this.master = context.createGain(); this.master.gain.value = 0;
+      const limiter = context.createDynamicsCompressor();
+      limiter.threshold.value = -3; limiter.knee.value = 0; limiter.ratio.value = 20;
+      limiter.attack.value = .003; limiter.release.value = .05;
+      const ceiling = context.createWaveShaper(), curve = new Float32Array(8193), limit = 10 ** (-3 / 20);
+      for (let i = 0; i < curve.length; i++) curve[i] = Math.max(-limit, Math.min(limit, 2 * i / (curve.length - 1) - 1));
+      ceiling.curve = curve;
+      this.master.connect(limiter).connect(ceiling).connect(context.destination);
+      await context.resume();
+      if (generation !== this.generation) throw Error('開始を取り消しました。');
+      this.running = true; this.muted = false;
+      this.configure(settings); this.setMasterGain(settings.masterGain);
+      return {warnings};
     } catch (error) {
-      try { await this.stop(); } catch {}
+      await this.stop();
       throw error;
     }
   }
 
   configure(settings) {
-    if (!this.running) return;
-    this.stopModules();
-    const branches = settings.branches.filter(branch => branch.enabled);
-    const normalization = Math.max(1, branches.reduce((sum, branch) => sum + Math.abs(dbToGain(branch.gain)), 0));
-    branches.forEach((branch, index) => this.addModule(`branch-${index}`, this.createSelfVoiceBranch(branch, normalization)));
-    if (settings.direct.enabled) this.addModule('direct', this.createDirectFeedback(settings.direct));
-    if (settings.masking.enabled) this.addModule('masking', this.createMasking(settings.masking));
-    if (settings.metronome.enabled) this.addModule('metronome', this.createMetronome(settings.metronome));
+    if (!this.running || this.muted) return;
+    if (settings.branches.some(b => b.enabled && b.pitch !== 0) && !this.pitchReady) {
+      throw Error('音程処理が利用できません。音程を0に戻すか、対応環境で再読み込みしてください。');
+    }
+    const previous = this.modules;
+    this.modules = new Map();
+    const branches = settings.branches.filter(b => b.enabled);
+    const weight = branches.reduce((sum, b) => sum + dbToGain(b.gain), 0) +
+      (settings.direct.enabled ? dbToGain(settings.direct.gain) : 0) +
+      (settings.masking.enabled ? dbToGain(settings.masking.gain) : 0) +
+      (settings.metronome.enabled ? .018 : 0);
+    this.normalization = Math.max(1, weight);
+    try {
+      branches.forEach((b, i) => this.modules.set(`branch-${i}`, this.createBranch(b)));
+      if (settings.direct.enabled) this.modules.set('direct', this.createBranch({...settings.direct, delay: 0, pitch: 0}));
+      if (settings.masking.enabled) this.modules.set('masking', this.createMasking(settings.masking));
+      if (settings.metronome.enabled) this.modules.set('metronome', this.createMetronome(settings.metronome));
+    } catch (error) {
+      this.modules.forEach(m => m.stop()); this.modules = previous;
+      throw error;
+    }
+    previous.forEach(module => {
+      module.gate.gain.setTargetAtTime(0, this.context.currentTime, .008);
+      this.retired.add(module);
+      setTimeout(() => { module.stop(); this.retired.delete(module); }, 60);
+    });
   }
 
-  setMasterGain(value) {
-    if (!this.master || this.muted) return;
-    this.master.gain.setTargetAtTime(dbToGain(value), this.context.currentTime, .035);
+  gate() {
+    const gate = this.context.createGain(); gate.gain.value = 0;
+    gate.connect(this.master); gate.gain.setTargetAtTime(1, this.context.currentTime, .015);
+    return gate;
   }
 
-  createSelfVoiceBranch(branch, normalization) {
-    const delay = this.context.createDelay(.31);
-    const level = this.context.createGain();
-    const pan = this.context.createStereoPanner();
-    delay.delayTime.value = Math.max(0, Number(branch.delay) || 0) / 1000;
-    level.gain.value = 0;
+  createBranch(branch) {
+    if (!this.source) throw Error('マイクが未使用です。補助を停止してから改めて開始してください。');
+    const context = this.context, delay = context.createDelay(.31), level = context.createGain(),
+      pan = context.createStereoPanner();
+    const shifter = branch.pitch ? new AudioWorkletNode(context, 'stuttersuite-pitch', {
+      numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], processorOptions: {pitch: branch.pitch}
+    }) : null;
+    const gate = this.gate(), first = shifter || delay, input = this.source;
+    input.connect(first); if (shifter) shifter.connect(delay);
+    delay.delayTime.value = branch.delay / 1000;
+    level.gain.value = dbToGain(branch.gain) / this.normalization;
     pan.pan.value = panValue(branch.pan);
-    this.source.connect(delay).connect(level).connect(pan).connect(this.master);
-    level.gain.setTargetAtTime(dbToGain(branch.gain) / normalization, this.context.currentTime, .02);
-    return nodeModule([delay, level, pan]);
-  }
-
-  createDirectFeedback(settings) {
-    const level = this.context.createGain();
-    const pan = this.context.createStereoPanner();
-    level.gain.value = 0;
-    pan.pan.value = panValue(settings.pan);
-    this.source.connect(level).connect(pan).connect(this.master);
-    level.gain.setTargetAtTime(dbToGain(settings.gain), this.context.currentTime, .02);
-    return nodeModule([level, pan]);
+    delay.connect(level).connect(pan).connect(gate);
+    if (shifter) shifter.onprocessorerror = () => this.onFault('音程処理でエラーが発生したため停止しました。');
+    let stopped = false;
+    return {gate, stop() {
+      if (stopped) return; stopped = true;
+      try { input.disconnect(first); } catch {}
+      if (shifter) { shifter.onprocessorerror = null; shifter.port.postMessage({type: 'dispose'}); shifter.port.close(); }
+      [shifter, delay, level, pan, gate].filter(Boolean).forEach(n => { try { n.disconnect(); } catch {} });
+    }};
   }
 
   createMasking(settings) {
-    const source = this.context.createBufferSource();
-    const filter = this.context.createBiquadFilter();
-    const level = this.context.createGain();
-    source.buffer = makeNoiseBuffer(this.context, settings.type);
-    source.loop = true;
+    const source = this.context.createBufferSource(), filter = this.context.createBiquadFilter(),
+      level = this.context.createGain(), gate = this.gate();
+    source.buffer = makeNoiseBuffer(this.context, settings.type); source.loop = true;
     filter.type = settings.filter === 'none' ? 'allpass' : settings.filter;
     filter.frequency.value = settings.filter === 'highpass' ? 180 : settings.filter === 'lowpass' ? 6000 : 1000;
-    level.gain.value = 0;
-    source.connect(filter).connect(level).connect(this.master);
-    source.start();
-    level.gain.setTargetAtTime(dbToGain(settings.gain), this.context.currentTime, .08);
-    return nodeModule([source, filter, level], () => { try { source.stop(); } catch {} });
+    level.gain.value = dbToGain(settings.gain) / this.normalization;
+    source.connect(filter).connect(level).connect(gate); source.start();
+    return {gate, stop() { try { source.stop(); } catch {} [source, filter, level, gate].forEach(n => { try { n.disconnect(); } catch {} }); }};
   }
 
   createMetronome(settings) {
-    let timer = null;
+    const context = this.context, gate = this.gate(), nodes = new Set();
     const tick = () => {
       if (settings.type !== 'sound') this.onPulse();
-      if (settings.type === 'visual') return;
-      const oscillator = this.context.createOscillator();
-      const level = this.context.createGain();
-      oscillator.frequency.value = 880;
-      level.gain.value = .018;
-      oscillator.connect(level).connect(this.master);
-      oscillator.start();
-      oscillator.stop(this.context.currentTime + .035);
+      if (settings.type === 'visual' || this.muted) return;
+      const osc = context.createOscillator(), level = context.createGain();
+      osc.frequency.value = 880; level.gain.value = .018 / this.normalization;
+      osc.connect(level).connect(gate); nodes.add(osc);
+      osc.onended = () => { nodes.delete(osc); osc.disconnect(); level.disconnect(); };
+      osc.start(); osc.stop(context.currentTime + .035);
     };
-    tick();
-    timer = setInterval(tick, 60000 / Math.max(30, Math.min(180, Number(settings.bpm) || 60)));
-    return { stop: () => clearInterval(timer) };
+    tick(); const timer = setInterval(tick, 60000 / settings.bpm);
+    return {gate, stop() { clearInterval(timer); nodes.forEach(n => { try { n.stop(); } catch {} }); gate.disconnect(); }};
   }
 
-  addModule(name, module) { this.modules.set(name, module); }
-  stopModules() {
-    // Disconnecting downstream nodes alone leaves source -> old module links intact.
-    // The microphone source has no other routes in this engine, so clear its fan-out first.
-    if (this.source) { try { this.source.disconnect(); } catch {} }
-    this.modules.forEach(module => module.stop());
-    this.modules.clear();
+  setMasterGain(value) {
+    if (this.master && !this.muted) this.master.gain.setTargetAtTime(dbToGain(value), this.context.currentTime, .035);
   }
 
-  mute() {
-    if (!this.running || this.muted) return;
-    this.master.gain.cancelScheduledValues(this.context.currentTime);
-    this.master.gain.setTargetAtTime(0, this.context.currentTime, .004);
-    this.muted = true;
-  }
-
+  // Stop releases the microphone, closes the DSP context and drops all buffer owners.
+  mute() { return this.stop(); }
   async stop() {
-    this.stopModules();
-    if (this.stream) this.stream.getTracks().forEach(track => track.stop());
-    if (this.context && this.context.state !== 'closed') await this.context.close();
-    this.context = this.stream = this.source = this.master = this.limiter = null;
-    this.running = this.muted = false;
+    this.generation++; this.running = false; this.muted = true;
+    const context = this.context, stream = this.stream;
+    if (this.master && context?.state !== 'closed') this.master.gain.setValueAtTime(0, context.currentTime);
+    this.stream = null; stream?.getTracks().forEach(t => t.stop());
+    this.modules.forEach(m => m.stop()); this.retired.forEach(m => m.stop());
+    this.modules.clear(); this.retired.clear();
+    this.context = this.source = this.master = null; this.pitchReady = false;
+    if (context && context.state !== 'closed') await context.close();
+    this.muted = false;
   }
 }
-
 function dbToGain(value) { return Math.pow(10, Number(value) / 20); }
 function panValue(value) { return value === 'left' ? -1 : value === 'right' ? 1 : 0; }
-function nodeModule(nodes, beforeStop = () => {}) {
-  return { stop() { beforeStop(); nodes.forEach(node => { try { node.disconnect(); } catch {} }); } };
-}
 function makeNoiseBuffer(context, type) {
-  const buffer = context.createBuffer(1, context.sampleRate * 2, context.sampleRate);
-  const output = buffer.getChannelData(0);
+  const buffer = context.createBuffer(1, context.sampleRate * 2, context.sampleRate), out = buffer.getChannelData(0);
   let pink = 0, brown = 0;
-  for (let i = 0; i < output.length; i++) {
+  for (let i = 0; i < out.length; i++) {
     const white = Math.random() * 2 - 1;
-    pink = .98 * pink + .02 * white;
-    brown = Math.max(-1, Math.min(1, (brown + .02 * white) / 1.02));
-    output[i] = type === 'pink' ? pink * 3.5 : type === 'brown' ? brown * 3.5 : white;
+    pink = .98 * pink + .02 * white; brown = Math.max(-1, Math.min(1, (brown + .02 * white) / 1.02));
+    out[i] = type === 'pink' ? pink * 3.5 : type === 'brown' ? brown * 3.5 : white;
   }
   return buffer;
 }
