@@ -6,7 +6,7 @@
   const sync = () => {
     $('#compactAssist').textContent = $('#assistStatus').textContent.trim();
     $('#compactPhrase').textContent = $('#currentPhrase').textContent.trim();
-    $('#compactSource').textContent = '原稿の現在句:';
+    $('#compactSource').textContent = '原稿の現在の句:';
     $('#compactGain').value = $('#masterGain').value;
     $('#compactRate').value = $('#ttsRate').value;
     $('#compactRateValue').textContent = $('#ttsRateValue').textContent;
@@ -23,6 +23,6 @@
   new MutationObserver(sync).observe($('#currentPhrase'), {childList:true,subtree:true,characterData:true});
   $('#settingLock').addEventListener('change', (event) => {
     document.querySelectorAll('#detailsPanel, .module-grid, .rhythm').forEach((section) => section.querySelectorAll('input,select,button').forEach((node) => node.disabled = event.target.checked || node.dataset.unavailable === 'true'));
-    if (event.target.checked) $('#audioMessage').textContent = '詳細設定をロックしました。補助停止と音量はそのまま操作できます。';
+    if (event.target.checked) $('#audioMessage').textContent = '詳細設定をロックしました。補助の停止と音量調整は引き続き操作できます。';
   });
 })();

@@ -19,13 +19,17 @@ async function run() {
   await execute(`globalThis.check=(value,message)=>{if(!value)throw Error(message);};globalThis.waitFor=async fn=>{for(let i=0;i<200;i++){if(fn())return;await new Promise(r=>setTimeout(r,10));}throw Error('wait timed out');};void 0;`);
   assert.equal(await execute(`AssistanceAudioEngine.supportsPitch()`), true);
   await execute(`document.querySelector('[data-help="guide-start"]').click();check(document.querySelector('#page-guide').classList.contains('active'),'guide navigation');check(!audio.stream,'guide must not capture microphone');`);
-  await execute(`go('assist');document.querySelector('[data-mode="faf"]').click();`);
-  await execute(`waitFor(()=>document.querySelector('[data-mode="faf"]').classList.contains('selected'))`);
-  const faf = await execute(`currentCondition()`); assert.equal(faf.branches[0].pitch, -3); assert.equal(faf.branches[0].delay, 0);
+  await execute(`go('assist');check(document.querySelectorAll('[data-mode]').length===0,'single custom UI');document.querySelector('#delayA').value=0;document.querySelector('#delayA').dispatchEvent(new Event('input'));document.querySelector('#pitchA').value=-3;document.querySelector('#pitchA').dispatchEvent(new Event('input'));`);
+  const faf = await execute(`currentCondition()`); assert.equal(faf.mode, 'custom'); assert.equal(faf.branches[0].pitch, -3); assert.equal(faf.branches[0].delay, 0);
+  await execute(`document.querySelector('#delayA').value=87;document.querySelector('#delayA').dispatchEvent(new Event('input'));check(currentCondition().branches[0].pitch===-3,'delay must preserve pitch');document.querySelector('#branchBEnabled').click();document.querySelector('#pitchB').value=6;document.querySelector('#pitchB').dispatchEvent(new Event('input'));check(currentCondition().branches[0].delay===87&&currentCondition().branches[1].pitch===6,'independent custom branches');`);
   await execute(`document.querySelector('#pitchA').value=4.5;document.querySelector('#pitchA').dispatchEvent(new Event('input'));check(document.querySelector('#pitchAValue').textContent==='4.5 半音','fractional pitch label');document.querySelector('#settingLock').click();check(document.querySelector('#pitchA').disabled,'lock');document.querySelector('#settingLock').click();check(!document.querySelector('#pitchA').disabled,'unlock');`);
   await execute(`data.profiles.push({id:'test',name:'FAF test',scene:'test',condition:currentCondition()});persist();`);
   await window.reload(); await execute(`globalThis.check=(v,m)=>{if(!v)throw Error(m);};globalThis.waitFor=async fn=>{for(let i=0;i<200;i++){if(fn())return;await new Promise(r=>setTimeout(r,10));}throw Error('wait timed out');};void 0;`);
   assert.equal(await execute(`data.profiles.find(p=>p.id==='test').condition.branches[0].pitch`), 4.5);
+  await execute(`applyProfile('test')`);
+  assert.equal(await execute(`currentCondition().mode==='custom'&&currentCondition().branches[0].delay===87&&currentCondition().branches[0].pitch===4.5&&currentCondition().branches[1].pitch===6`), true);
+  await execute(`data.profiles.push({id:'legacy-faf',name:'旧FAF',condition:normalizeCondition({mode:'faf',branches:[{enabled:true,delay:200,pitch:-3}]})});renderProfiles();applyProfile('legacy-faf');`);
+  await execute(`document.querySelector('#delayA').value=88;document.querySelector('#delayA').dispatchEvent(new Event('input'));check(currentCondition().mode==='custom'&&currentCondition().branches[0].pitch===-3&&currentCondition().branches[0].delay===88,'legacy FAF profile must permit custom delay');`);
 
   // Real Chromium AudioWorklet and stereo graph. Capture output in memory only.
   const spectrum = await execute(`(async()=>{
@@ -59,13 +63,12 @@ async function run() {
   await execute(`globalThis.lateStream=syntheticDestination.stream.clone();finishCapture(lateStream);pendingStart;`);
   assert.equal(await execute(`lateStream.getTracks().every(t=>t.readyState==='ended')&&!audio.running&&audio.context===null`), true);
 
-  // Changing mode during preparation must not start the old mode behind the UI.
+  // Loading a saved profile during preparation must cancel the old start.
   await execute(`delete globalThis.finishCapture;globalThis.pendingStart=startAssist();void 0;`);
   await execute(`waitFor(()=>typeof finishCapture==='function')`);
-  await execute(`document.querySelector('[data-mode="none"]').click();`);
-  await execute(`waitFor(()=>document.querySelector('[data-mode="none"]').classList.contains('selected'))`);
+  await execute(`applyProfile('presentation')`);
   await execute(`globalThis.modeLateStream=syntheticDestination.stream.clone();finishCapture(modeLateStream);pendingStart;`);
-  assert.equal(await execute(`!audio.running&&modeLateStream.getTracks().every(t=>t.readyState==='ended')&&currentCondition().mode==='none'`), true);
+  assert.equal(await execute(`!audio.running&&modeLateStream.getTracks().every(t=>t.readyState==='ended')&&currentCondition().branches.every(b=>!b.enabled)`), true);
 
   // Restart before an ignored permission request settles. Old success/failure
   // must release only its own stream and leave the new session and UI intact.
@@ -74,14 +77,13 @@ async function run() {
     await execute(`waitFor(()=>typeof finishCapture==='function')`);
     await execute(`emergencyStop()`);
     assert.equal(await execute(`audio.starting===null&&!document.querySelector('#startAssist').disabled`), true);
-    await execute(`document.querySelector('[data-mode="none"]').click();`);
-    await execute(`waitFor(()=>currentCondition().mode==='none')`);
+    await execute(`applyProfile('presentation')`);
     await execute(`document.querySelector('#startAssist').click();`);
     await execute(`waitFor(()=>audio.running&&!audio.starting)`);
     await execute(`globalThis.replacementContext=audio.context;globalThis.replacementMessage=document.querySelector('#audioMessage').textContent;void 0;`);
     if (outcome === 'resolve') await execute(`globalThis.restartLateStream=syntheticDestination.stream.clone();finishCapture(restartLateStream);pendingStart;`);
     else await execute(`failCapture(Object.assign(Error('late permission denial'),{name:'NotAllowedError'}));pendingStart;`);
-    assert.equal(await execute(`audio.running&&audio.context===replacementContext&&!audio.stream&&document.querySelector('#assistStatus').classList.contains('running')&&document.querySelector('#startAssist').disabled&&!document.querySelector('#muteAssist').disabled&&document.querySelector('#audioMessage').textContent===replacementMessage&&sessionConditionSnapshot.mode==='none'`), true, `late ${outcome} must not change the new session UI`);
+    assert.equal(await execute(`audio.running&&audio.context===replacementContext&&!audio.stream&&document.querySelector('#assistStatus').classList.contains('running')&&document.querySelector('#startAssist').disabled&&!document.querySelector('#muteAssist').disabled&&document.querySelector('#audioMessage').textContent===replacementMessage&&sessionConditionSnapshot.mode==='custom'&&sessionConditionSnapshot.branches.every(b=>!b.enabled)`), true, `late ${outcome} must not change the new session UI`);
     if (outcome === 'resolve') assert.equal(await execute(`restartLateStream.getTracks().every(t=>t.readyState==='ended')`), true);
     await execute(`emergencyStop()`);
   }
@@ -101,7 +103,7 @@ async function run() {
 
   // Comparison preparation and baseline never automatically acquire a microphone.
   await execute(`go('home');document.querySelector('#startTrial').click();document.querySelector('#trialProfileA').value='baseline';document.querySelector('#trialProfileB').value='test';document.querySelector('#trialRandomize').checked=false;document.querySelector('#trialStartButton').click();`);
-  await execute(`waitFor(()=>trial.active && currentCondition().mode==='none')`);
+  await execute(`waitFor(()=>trial.active && currentCondition().branches.every(b=>!b.enabled))`);
   assert.equal(await execute(`!audio.running && !audio.stream && currentCondition().branches.every(b=>!b.enabled)`), true);
 
   // TTS never picks a remote voice, even if it is the only voice available.
@@ -113,22 +115,24 @@ async function run() {
   await execute(`globalThis.imported={schema_version:4,profiles:[{id:'restored',name:'old DAF',condition:{mode:'daf',branches:[{enabled:true,delay:88,pitch:0,gain:-8,pan:'right'}]}}],script:'旧原稿。',phrases:[{id:'p',text:'旧原稿。',reading:'きゅうげんこう。'}],reflections:[{note:'旧メモ',at:'2026-09-22',profile:'old DAF'}]};const transfer=new DataTransfer();transfer.items.add(new File([JSON.stringify(imported)],'backup.json',{type:'application/json'}));document.querySelector('#restoreData').files=transfer.files;document.querySelector('#restoreData').dispatchEvent(new Event('change'));`);
   await execute(`waitFor(()=>data.profiles[0].id==='restored')`);
   assert.equal(await execute(`data.profiles[0].condition.branches[0].delay===88&&data.script==='旧原稿。'&&!audio.running`), true);
+  await execute(`document.querySelector('#pitchA').value=6;document.querySelector('#pitchA').dispatchEvent(new Event('input'));check(currentCondition().mode==='custom'&&currentCondition().branches[0].pitch===6&&currentCondition().branches[0].delay===88,'legacy DAF profile must permit custom pitch');`);
 
   // No capability must stay disabled even after toggling the settings lock.
-  await execute(`globalThis.oldSupport=AssistanceAudioEngine.supportsPitch;AssistanceAudioEngine.supportsPitch=()=>false;updatePitchSupport();document.querySelector('#settingLock').click();document.querySelector('#settingLock').click();check(document.querySelector('#pitchA').disabled,'unsupported pitch lock');check(document.querySelector('[data-mode="faf"]').disabled,'unsupported FAF');AssistanceAudioEngine.supportsPitch=oldSupport;updatePitchSupport();`);
+  await execute(`globalThis.oldSupport=AssistanceAudioEngine.supportsPitch;AssistanceAudioEngine.supportsPitch=()=>false;updatePitchSupport();document.querySelector('#settingLock').click();document.querySelector('#settingLock').click();check(document.querySelector('#pitchA').disabled&&document.querySelector('#pitchB').disabled,'unsupported pitch lock');check(!document.querySelector('#delayA').disabled,'delay remains available');AssistanceAudioEngine.supportsPitch=oldSupport;updatePitchSupport();`);
   const persisted = await execute(`JSON.parse(localStorage.getItem(STORE))`);
   assert.deepEqual(Object.keys(persisted).sort(), ['schema_version','profiles','script','phrases','reflections','ttsRate'].sort());
   assert.ok(requests.every(r => r.method === 'GET' && r.url.startsWith(origin + '/')), 'no audio uploads or external requests');
   assert.ok(requests.some(r => r.url.endsWith('/pitch-core.mjs')), 'DSP module requested');
   assert.equal(errors.length, 0, errors.join('\n'));
 
-  await execute(`syntheticOsc.stop();syntheticDestination.stream.getTracks().forEach(t=>t.stop());syntheticContext.close();data.profiles=JSON.parse(JSON.stringify(defaultProfiles));activeProfile=data.profiles[0].id;renderProfiles();applyCondition(defaultCondition());go('home');`);
+  await execute(`syntheticOsc.stop();syntheticDestination.stream.getTracks().forEach(t=>t.stop());syntheticContext.close();data.profiles=JSON.parse(JSON.stringify(defaultProfiles));activeProfile=data.profiles[0].id;renderProfiles();applyCondition(defaultCondition());document.querySelector('#audioMessage').textContent='開始前はマイクを使用しません。';go('home');`);
   await execute(`new Promise(resolve=>setTimeout(resolve,3700))`);
   const output = path.join(__dirname, '..', '.test-output');fs.mkdirSync(output, {recursive:true});
-  const save = async name => {await execute('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');fs.writeFileSync(path.join(output,name), (await window.webContents.capturePage()).toPNG());};
-  await save('home.png');await execute(`go('assist');document.querySelector('[data-mode="faf"]').click();`);await save('assist.png');await execute(`go('guide')`);await save('guide.png');
+  const save = async name => {await execute('new Promise(resolve=>setTimeout(()=>requestAnimationFrame(()=>requestAnimationFrame(resolve)),150))');fs.writeFileSync(path.join(output,name), (await window.webContents.capturePage()).toPNG());};
+  await save('home.png');await execute(`go('assist');document.querySelector('#delayA').value=0;document.querySelector('#pitchA').value=-3;document.querySelector('#pitchA').dispatchEvent(new Event('input'));`);await save('assist.png');await execute(`go('guide')`);await save('guide.png');
   window.setSize(390,844);await execute(`go('home')`);await save('home-mobile.png');
   assert.equal(await execute(`document.documentElement.scrollWidth<=innerWidth`), true, 'mobile horizontal overflow');
+  await execute(`go('assist')`);assert.equal(await execute(`document.documentElement.scrollWidth<=innerWidth`), true, 'assist horizontal overflow');await save('assist-mobile.png');
   await execute(`go('guide')`);assert.equal(await execute(`document.documentElement.scrollWidth<=innerWidth`), true, 'guide horizontal overflow');await save('guide-mobile.png');
   clearTimeout(timeout);console.log('BROWSER TESTS PASSED', JSON.stringify({spectrum,requests:requests.length,privacy:'GET-only same-origin assets; no audio saved; synthetic inputs only'}));
 }
