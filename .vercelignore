@@ -2,3 +2,5 @@ node_modules/
 .test-output/
 tests/
 .github/
+package-lock.json
+server.js

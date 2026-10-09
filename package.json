@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server.js --open",
     "test": "node --test tests/*.test.cjs",
-    "test:browser": "npx --yes --package=electron@44.5.1 electron tests/browser.cjs"
-  }
+    "test:browser": "electron tests/browser.cjs --mute-audio --disable-gpu"
+  },
+  "devDependencies": {"electron": "44.5.1"}
 }

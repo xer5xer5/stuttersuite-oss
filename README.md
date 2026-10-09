@@ -26,7 +26,15 @@ node server.js
 
 ## 開発・検証
 
-Node.js 24で `npm test`。ブラウザ検証は `npm run test:browser`（初回はnpmからElectron 44.5.1を取得）で、実際の声を使わず合成入力で実行します。Electronは本アプリの実行や公開には不要です。実装と検証の範囲は [WEB_IMPLEMENTATION_JA.md](WEB_IMPLEMENTATION_JA.md) を参照してください。
+Node.js 24で `npm test`。ブラウザ検証は最初に `npm ci` でテスト専用のElectron 44.5.1を取得し、`npm run test:browser` を実行します。画面を表示せず、音声出力とGPU利用を無効にし、実際の声を使わず合成入力で検証します。GitHub ActionsでもNodeテストとブラウザテストを実行します。Electronは本アプリの実行や公開には不要です。実装と検証の範囲は [WEB_IMPLEMENTATION_JA.md](WEB_IMPLEMENTATION_JA.md) を参照してください。
+
+バックアップは2 MiBまで、原稿は50,000文字、設定は100件、句と履歴は各2,000件、メモは10,000文字までです。読み込みデータは検証・移行後に保存し、不正なデータや保存失敗で元データを置き換えません。保存データが壊れているか将来の形式だった場合は上書きを止め、元データの書き出し・正常なバックアップの復元・削除を案内します。保存容量不足時は未保存の内容もバックアップへ書き出せます。
+
+緊急停止のショートカットは、このタブにフォーカスがあるときだけ有効です。別アプリを操作中のOS全体ショートカットはWeb版では提供しません。緊急停止ボタンまたはショートカットは、同じブラウザ・同じサイトの他タブへ停止を通知します。別のブラウザやプライベートウィンドウには伝わりません。タブを閉じるだけでは他タブは停止しません。
+
+`vercel.json` にCSP（`frame-ancestors 'none'`）、X-Frame-Options、nosniff、Referrer-Policy、Permissions-Policyを設定しています。マイクと出力機器の選択は同じサイトで許可します。ローカルサーバーも同じヘッダーを使います。公開反映後は実際の応答ヘッダーも確認してください。
+
+Vercelでは依存インストールをスキップし、テスト用Electronを取得しません。ローカル配信用server.jsとテスト・lockfileは静的配信から除外します。
 
 ## License
 
