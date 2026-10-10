@@ -11,3 +11,16 @@ jobs:
         with:
           node-version: '24'
       - run: npm test
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      # Chromium's sandbox helper is not configured in the CI runner.
+      # This flag is for the isolated test runner only, not the public app.
+      - run: xvfb-run --auto-servernum npm run test:browser -- --no-sandbox

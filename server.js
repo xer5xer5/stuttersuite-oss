@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 const http = require('node:http'), fs = require('node:fs'), path = require('node:path');
 const {execFile} = require('node:child_process');
+const securityHeaders = require('./vercel.json').headers[0].headers;
 const root = __dirname;
 const types = {'.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.mjs': 'text/javascript'};
 const allowed = new Set(['index.html', 'styles.css', 'compact.css', 'compact.js', 'app.js', 'audio-engine.js', 'pitch-worklet.js', 'pitch-core.mjs']);
 function createServer() {
   return http.createServer((request, response) => {
+    for (const header of securityHeaders) response.setHeader(header.key, header.value);
     let name;
     try { name = decodeURIComponent(request.url.split('?')[0]).slice(1) || 'index.html'; }
     catch { response.writeHead(400); response.end('Bad request'); return; }

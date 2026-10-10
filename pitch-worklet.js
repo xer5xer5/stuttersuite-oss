@@ -6,6 +6,7 @@ class PitchProcessor extends AudioWorkletProcessor {
     super(); this.dsp = new PitchShiftDSP(sampleRate, options.processorOptions?.pitch || 0);
     this.port.onmessage = ({data}) => {
       if (data.type === 'dispose') { this.dsp?.clear(); this.dsp = null; }
+      if (data.type === 'pitch' && Number.isFinite(data.value)) this.dsp?.setPitch(data.value);
     };
   }
   process(inputs, outputs) {

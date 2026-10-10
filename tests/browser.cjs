@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Run with Electron. All microphone inputs below are synthetic; no real voice is captured.
 const {app, BrowserWindow, session} = require('electron');
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('mute-audio');
 const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
 const {createServer} = require('../server.js');
 app.setPath('userData', path.join(__dirname, '..', '.test-output', `profile-${Date.now()}`));
-let server, window;
+let server, window, secondWindow;
 async function run() {
   server = createServer(); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const timeout=setTimeout(()=>{console.error('Browser test timeout');app.exit(1);},90000);
@@ -49,12 +51,21 @@ async function run() {
   await execute(`globalThis.syntheticContext=new AudioContext();globalThis.syntheticOsc=syntheticContext.createOscillator();const level=syntheticContext.createGain();level.gain.value=.01;globalThis.syntheticDestination=syntheticContext.createMediaStreamDestination();syntheticOsc.connect(level).connect(syntheticDestination);syntheticOsc.start();globalThis.captureCount=0;navigator.mediaDevices.getUserMedia=async()=>{captureCount++;return syntheticDestination.stream.clone();};void 0;`);
   await execute(`applyCondition({mode:'combo',branches:[{enabled:true,pitch:3,delay:50,gain:-6,pan:'left'},{enabled:true,pitch:-3,delay:100,gain:-9,pan:'right'}],masterGain:-40});startAssist();`);
   assert.equal(await execute(`audio.running`), true);
+  await execute(`globalThis.originalModules=[...audio.modules.values()];for(let i=0;i<1000;i++)audio.configure(normalizeCondition({mode:'custom',branches:[{enabled:true,pitch:3+i%4,delay:i%300,gain:-6-i%12,pan:i%2?'left':'both'},{enabled:true,pitch:-3,delay:100,gain:-9,pan:'right'}]}));check([...audio.modules.values()].every((module,i)=>module===originalModules[i]),'live parameter changes must reuse nodes');check(audio.retired.size===0,'no retired graphs for parameter changes');`);
   await execute(`globalThis.lastStream=audio.stream;document.querySelector('#delayA').value=75;document.querySelector('#delayA').dispatchEvent(new Event('input'));`);
   await execute(`muteAssist()`);
   assert.equal(await execute(`lastStream.getTracks().every(t=>t.readyState==='ended') && audio.context===null && audio.modules.size===0 && audio.retired.size===0`), true);
   await execute(`startAssist()`); assert.equal(await execute(`audio.running`), true);
   await execute(`emergencyStop();`); await execute(`emergencyStop();`);
   assert.equal(await execute(`audio.context===null && !audio.stream && !document.querySelector('#startAssist').disabled`), true);
+
+  // An old asynchronous stop must never relabel a replacement live session.
+  await execute(`startAssist()`);
+  await execute(`globalThis.originalClose=AudioContext.prototype.close;let delayed=true;AudioContext.prototype.close=function(){const native=originalClose.call(this);if(!delayed)return native;delayed=false;return new Promise(resolve=>globalThis.finishOldClose=()=>native.then(resolve));};globalThis.oldStop=emergencyStop({broadcast:false});void 0;`);
+  await execute(`emergencyStop({broadcast:false})`);await execute(`startAssist()`);
+  await execute(`finishOldClose();oldStop`);
+  assert.equal(await execute(`audio.running&&document.querySelector('#assistStatus').classList.contains('running')&&document.querySelector('#micStatus').classList.contains('running')&&document.querySelector('#startAssist').disabled&&!document.querySelector('#muteAssist').disabled`),true);
+  await execute(`AudioContext.prototype.close=originalClose;emergencyStop({broadcast:false})`);
 
   // Stop while getUserMedia is awaiting its result must discard the late stream.
   await execute(`navigator.mediaDevices.getUserMedia=()=>new Promise(resolve=>globalThis.finishCapture=resolve);globalThis.pendingStart=startAssist();void 0;`);
@@ -95,6 +106,30 @@ async function run() {
   await execute(`AudioContext.prototype.setSinkId=originalSetSink;finishSink();pendingSinkStart;`);
   assert.equal(await execute(`captureCount===beforeSinkCaptureCount&&!audio.running&&!audio.stream&&audio.context===null&&audio.starting===null&&document.querySelector('#audioMessage').textContent.includes('マイクを解放しました')`), true);
 
+  // Delay native output switches deliberately; only one may run at a time.
+  await execute(`applyCondition(withoutAssistance(defaultCondition()));startAssist()`);
+  await execute(`globalThis.actualSink='';Object.defineProperty(audio.context,'sinkId',{get:()=>actualSink});globalThis.sinkCalls=[];globalThis.sinkFinishes=[];AudioContext.prototype.setSinkId=function(id){sinkCalls.push(id);return new Promise((resolve,reject)=>sinkFinishes.push({resolve:()=>{actualSink=id;resolve();},reject}));};const output=document.querySelector('#outputDevice');output.add(new Option('test A','test-A'));output.add(new Option('test B','test-B'));output.value='test-B';globalThis.firstSwitch=output.onchange();check(output.disabled,'output locked during switch');output.value='test-A';globalThis.lastSwitch=output.onchange();void 0;`);
+  await execute(`waitFor(()=>sinkCalls.length===1);`);
+  assert.deepEqual(await execute('sinkCalls'),['test-B']);
+  await execute(`enumerateDevices()`);
+  assert.equal(await execute(`document.querySelector('#outputDevice').value==='test-A'&&document.querySelector('#outputDevice').disabled`),true,'device refresh preserves pending selection');
+  await execute(`sinkFinishes.shift().resolve();firstSwitch;`);
+  await execute(`waitFor(()=>sinkCalls.length===2);check(document.querySelector('#outputDevice').disabled,'latest switch keeps output locked');sinkFinishes.shift().resolve();lastSwitch;`);
+  assert.equal(await execute(`actualSink==='test-A'&&audio.outputDeviceId==='test-A'&&document.querySelector('#outputDevice').value==='test-A'&&!document.querySelector('#outputDevice').disabled`),true,'output matches latest selection');
+  await execute(`enumerateDevices()`);
+  assert.equal(await execute(`document.querySelector('#outputDevice').value==='test-A'`),true,'device refresh preserves actual output');
+  await execute(`document.querySelector('#outputDevice').add(new Option('test B','test-B'));`);
+  await execute(`document.querySelector('#outputDevice').value='test-B';globalThis.failedSwitch=document.querySelector('#outputDevice').onchange();void 0;`);
+  await execute(`waitFor(()=>sinkFinishes.length===1);sinkFinishes.shift().reject(Error('unavailable'));failedSwitch;`);
+  assert.equal(await execute(`document.querySelector('#outputDevice').value==='test-A'&&!document.querySelector('#outputDevice').disabled&&document.querySelector('#toast').textContent.includes('変更できません')`),true,'failed switch restores actual output and unlocks');
+  await execute(`document.querySelector('#outputDevice').value='test-B';globalThis.cancelledSwitch=document.querySelector('#outputDevice').onchange();void 0;`);
+  await execute(`waitFor(()=>sinkFinishes.length===1);`);
+  await execute(`emergencyStop({broadcast:false})`);
+  await execute(`AudioContext.prototype.setSinkId=originalSetSink;document.querySelector('#outputDevice').value='default';startAssist()`);
+  await execute(`globalThis.afterRestartToast=document.querySelector('#toast').textContent;sinkFinishes.shift().resolve();cancelledSwitch;`);
+  assert.equal(await execute(`audio.running&&audio.outputDeviceId==='default'&&document.querySelector('#outputDevice').value==='default'&&!document.querySelector('#outputDevice').disabled&&document.querySelector('#toast').textContent===afterRestartToast`),true,'late output completion leaves replacement UI intact');
+  await execute(`emergencyStop({broadcast:false})`);
+
   // Missing worklet remains an explicit failure for FAF, while DAF still starts.
   await execute(`navigator.mediaDevices.getUserMedia=async()=>syntheticDestination.stream.clone();globalThis.originalAddModule=AudioWorklet.prototype.addModule;AudioWorklet.prototype.addModule=async()=>{throw Error('test missing worklet');};applyCondition({mode:'faf',branches:[{enabled:true,pitch:-3,delay:0}]});startAssist();`);
   assert.equal(await execute(`!audio.running && document.querySelector('#audioMessage').textContent.includes('FAFを開始できません')`), true);
@@ -115,6 +150,13 @@ async function run() {
   await execute(`globalThis.imported={schema_version:4,profiles:[{id:'restored',name:'old DAF',condition:{mode:'daf',branches:[{enabled:true,delay:88,pitch:0,gain:-8,pan:'right'}]}}],script:'旧原稿。',phrases:[{id:'p',text:'旧原稿。',reading:'きゅうげんこう。'}],reflections:[{note:'旧メモ',at:'2026-09-22',profile:'old DAF'}]};const transfer=new DataTransfer();transfer.items.add(new File([JSON.stringify(imported)],'backup.json',{type:'application/json'}));document.querySelector('#restoreData').files=transfer.files;document.querySelector('#restoreData').dispatchEvent(new Event('change'));`);
   await execute(`waitFor(()=>data.profiles[0].id==='restored')`);
   assert.equal(await execute(`data.profiles[0].condition.branches[0].delay===88&&data.script==='旧原稿。'&&!audio.running`), true);
+  await execute(`(async()=>{globalThis.restoreFixture=async value=>{const input=document.querySelector('#restoreData'),transfer=new DataTransfer();transfer.items.add(new File([JSON.stringify(value)],'backup.json',{type:'application/json'}));input.files=transfer.files;await input.onchange({target:input});};globalThis.beforeBadBackup=localStorage.getItem(STORE);globalThis.beforeBadData=JSON.stringify(data);await restoreFixture({...JSON.parse(beforeBadData),phrases:[null]});check(localStorage.getItem(STORE)===beforeBadBackup&&JSON.stringify(data)===beforeBadData,'invalid backup must preserve storage and memory');})()`);
+  await execute(`(async()=>{globalThis.originalSetItem=Storage.prototype.setItem;Storage.prototype.setItem=function(){throw new DOMException('quota','QuotaExceededError');};await restoreFixture({...JSON.parse(beforeBadData),script:'must not replace'});check(localStorage.getItem(STORE)===beforeBadBackup&&JSON.stringify(data)===beforeBadData,'quota failure must preserve backup state');check(!document.querySelector('#storageNotice').hidden&&document.querySelector('#storageMessage').textContent.includes('保存できません'),'quota failure visible');Storage.prototype.setItem=originalSetItem;void 0;})()`);
+  await execute(`Storage.prototype.setItem=function(){throw new DOMException('quota','QuotaExceededError');};document.querySelector('#scriptText').value='new unsaved draft';document.querySelector('#saveScript').click();check(localStorage.getItem(STORE)===beforeBadBackup&&JSON.stringify(data)===beforeBadData,'failed draft save preserves old data');check(backupContents().script==='new unsaved draft','unsaved draft remains exportable');Storage.prototype.setItem=originalSetItem;void 0;`);
+  await execute(`(async()=>{await restoreFixture({...JSON.parse(beforeBadData),profiles:[{id:'x"><a id="injected-link">bad</a>',name:'<b id="injected-name">literal</b>',condition:{}}],reflections:[{profile:'<b id="injected-history">literal</b>',note:'<img id="injected-note">',effort:5,wouldUse:'yes'}]});check(!document.querySelector('#injected-link,#injected-name,#injected-history,#injected-note'),'backup strings must not become HTML');check(document.querySelector('[data-use-profile]').dataset.useProfile===data.profiles[0].id,'opaque profile ID preserved');await restoreFixture(JSON.parse(beforeBadData));})()`);
+  await execute(`(async()=>{const input=document.querySelector('#txtImport'),transfer=new DataTransfer();transfer.items.add(new File(['x'.repeat(50001)],'large.txt',{type:'text/plain'}));input.files=transfer.files;const old=document.querySelector('#scriptText').value;await input.onchange({target:input});check(document.querySelector('#scriptText').value===old,'oversize TXT must not replace draft');check(document.querySelector('#toast').textContent.includes('50,000'),'size limit visible');})()`);
+  assert.equal(await execute(`['txtImportButton','restoreDataButton'].every((id,index)=>{go(index===0?'script':'settings');const node=document.getElementById(id);node.focus();return node.tagName==='BUTTON'&&document.activeElement===node;})`),true,'file import keyboard controls');
+  await execute(`go('home');document.querySelector('#startTrial').focus();openTrial();check(document.activeElement===document.querySelector('#trialModal .close'),'dialog entry focus');check(document.querySelector('.app-shell').inert,'background inert');window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));check(!document.querySelector('#trialModal').classList.contains('open')&&!document.querySelector('.app-shell').inert&&document.activeElement===document.querySelector('#startTrial'),'dialog escape and focus return');`);
   await execute(`document.querySelector('#pitchA').value=6;document.querySelector('#pitchA').dispatchEvent(new Event('input'));check(currentCondition().mode==='custom'&&currentCondition().branches[0].pitch===6&&currentCondition().branches[0].delay===88,'legacy DAF profile must permit custom pitch');`);
 
   // No capability must stay disabled even after toggling the settings lock.
@@ -125,7 +167,51 @@ async function run() {
   assert.ok(requests.some(r => r.url.endsWith('/pitch-core.mjs')), 'DSP module requested');
   assert.equal(errors.length, 0, errors.join('\n'));
 
+  // Emergency stop propagates once to another same-origin tab, including the storage fallback.
+  secondWindow=new BrowserWindow({show:false,webPreferences:{session:isolated,nodeIntegration:false,contextIsolation:true,sandbox:true,backgroundThrottling:false}});
+  await secondWindow.loadURL(origin+'/');
+  await secondWindow.webContents.executeJavaScript(`applyCondition(withoutAssistance(defaultCondition()));startAssist();`,true);
+  assert.equal(await secondWindow.webContents.executeJavaScript('audio.running'),true);
+  await execute(`applyCondition(withoutAssistance(defaultCondition()));startAssist()`);
+  await execute(`openTrial();window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));check(!document.querySelector('#trialModal').classList.contains('open'),'Esc closes comparison');`);
+  await execute(`new Promise(resolve=>setTimeout(resolve,80))`);
+  assert.equal(await execute('audio.running'),true,'modal Escape leaves local audio running');
+  assert.equal(await secondWindow.webContents.executeJavaScript('audio.running'),true,'modal Escape leaves other tab running');
+  await execute(`audio.onFault('test microphone disconnected');waitFor(()=>!audio.running&&document.querySelector('#audioMessage').textContent==='test microphone disconnected');`);
+  await execute(`new Promise(resolve=>setTimeout(resolve,80))`);
+  assert.equal(await secondWindow.webContents.executeJavaScript('audio.running'),true,'automatic fault stops only its own tab');
+  await execute(`startAssist()`);
+  await execute(`globalThis.originalConfigure=audio.configure;audio.configure=()=>{throw Error('test configuration fault');};refreshAudio();waitFor(()=>!audio.running&&document.querySelector('#audioMessage').textContent==='test configuration fault');`);
+  await execute(`audio.configure=originalConfigure;new Promise(resolve=>setTimeout(resolve,80))`);
+  assert.equal(await secondWindow.webContents.executeJavaScript('audio.running'),true,'configuration failure stays local');
+  await execute(`startAssist();`);
+  await execute(`openTrial();window.dispatchEvent(new KeyboardEvent('keydown',{code:'F12',ctrlKey:true,altKey:true,bubbles:true}));`);
+  for(let i=0;i<100;i++){if(await secondWindow.webContents.executeJavaScript('!audio.running&&audio.context===null'))break;await new Promise(resolve=>setTimeout(resolve,10));}
+  assert.equal(await secondWindow.webContents.executeJavaScript('!audio.running&&audio.context===null'),true,'explicit emergency shortcut works even in modal');
+  await execute(`closeTrial()`);
+  await secondWindow.webContents.executeJavaScript('startAssist()',true);
+  await execute(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));`);
+  for(let i=0;i<100;i++){if(await secondWindow.webContents.executeJavaScript('!audio.running&&audio.context===null'))break;await new Promise(resolve=>setTimeout(resolve,10));}
+  assert.equal(await secondWindow.webContents.executeJavaScript('!audio.running&&audio.context===null'),true,'Escape outside modal remains emergency stop');
+  await secondWindow.webContents.executeJavaScript('startAssist()',true);
+  await execute(`globalThis.stopEchoes=0;const receive=stopChannel.onmessage;stopChannel.onmessage=event=>{stopEchoes++;receive(event);};emergencyStop();`);
+  for(let i=0;i<100;i++){if(await secondWindow.webContents.executeJavaScript('!audio.running&&audio.context===null'))break;await new Promise(resolve=>setTimeout(resolve,10));}
+  assert.equal(await secondWindow.webContents.executeJavaScript('!audio.running&&audio.context===null'),true,'cross-tab broadcast stop');
+  assert.equal(await execute('stopEchoes'),0,'stop messages must not echo');
+  await secondWindow.webContents.executeJavaScript('startAssist()',true);
+  await execute(`stopChannel.close();emergencyStop();`);
+  for(let i=0;i<100;i++){if(await secondWindow.webContents.executeJavaScript('!audio.running&&audio.context===null'))break;await new Promise(resolve=>setTimeout(resolve,10));}
+  assert.equal(await secondWindow.webContents.executeJavaScript('!audio.running&&audio.context===null'),true,'storage fallback stop');
+  secondWindow.destroy();secondWindow=null;
+
   await execute(`syntheticOsc.stop();syntheticDestination.stream.getTracks().forEach(t=>t.stop());syntheticContext.close();data.profiles=JSON.parse(JSON.stringify(defaultProfiles));activeProfile=data.profiles[0].id;renderProfiles();applyCondition(defaultCondition());document.querySelector('#audioMessage').textContent='開始前はマイクを使用しません。';go('home');`);
+  const recoveryFixture=JSON.stringify({schema_version:5,profiles:[null],phrases:[]});
+  await execute(`localStorage.setItem(STORE,${JSON.stringify(recoveryFixture)})`);await window.reload();
+  assert.equal(await execute(`storageBlocked&&!document.querySelector('#storageNotice').hidden&&!document.querySelector('#exportRecovery').hidden&&recoveryRaw===localStorage.getItem(STORE)&&data.profiles.length>0`),true,'corrupt saved data has recoverable UI');
+  await execute(`document.querySelector('#scriptText').value='must not overwrite original';document.querySelector('#saveScript').click();`);
+  assert.equal(await execute('localStorage.getItem(STORE)'),recoveryFixture,'recovery mode protects original');
+  await execute(`localStorage.removeItem(STORE)`);await window.reload();
+  assert.equal(await execute('!storageBlocked&&document.querySelector("#storageNotice").hidden'),true);
   await execute(`new Promise(resolve=>setTimeout(resolve,3700))`);
   const output = path.join(__dirname, '..', '.test-output');fs.mkdirSync(output, {recursive:true});
   const save = async name => {await execute('new Promise(resolve=>setTimeout(()=>requestAnimationFrame(()=>requestAnimationFrame(resolve)),150))');fs.writeFileSync(path.join(output,name), (await window.webContents.capturePage()).toPNG());};
@@ -136,4 +222,4 @@ async function run() {
   await execute(`go('guide')`);assert.equal(await execute(`document.documentElement.scrollWidth<=innerWidth`), true, 'guide horizontal overflow');await save('guide-mobile.png');
   clearTimeout(timeout);console.log('BROWSER TESTS PASSED', JSON.stringify({spectrum,requests:requests.length,privacy:'GET-only same-origin assets; no audio saved; synthetic inputs only'}));
 }
-app.whenReady().then(run).then(()=>{window.destroy();server.close();app.exit(0);}).catch(error=>{console.error(error);window?.destroy();server?.close();app.exit(1);});
+app.whenReady().then(run).then(()=>{window.destroy();server.close();app.exit(0);}).catch(error=>{console.error(error);secondWindow?.destroy();window?.destroy();server?.close();app.exit(1);});
