@@ -18,15 +18,15 @@ function node() {
     connect() { return this; }, disconnect() {}};
 }
 function harness() {
-  const hooks = {worklet: async () => {}, sink: async () => {}, resume: async () => {}, capture: async () => stream()};
+  const hooks = {worklet: async () => {}, sink: async (context, id) => {context.sinkId=id;}, resume: async () => {}, capture: async () => stream()};
   const contexts = [], captures = [];
   class Context {
     constructor() {
-      this.state = 'running'; this.currentTime = 0;
+      this.state = 'running'; this.currentTime = 0; this.sinkId = '';
       this.audioWorklet = {addModule: () => hooks.worklet(this)};
       contexts.push(this);
     }
-    setSinkId() { return hooks.sink(this); }
+    setSinkId(id) { return hooks.sink(this, id); }
     createMediaStreamSource(input) { return {...node(), stream: input}; }
     createGain() { return node(); }
     createDynamicsCompressor() { return node(); }
@@ -108,4 +108,41 @@ test('a cancelled resume cannot close a replacement session', async t => {
   await engine.start({settings: micFree}); const context = engine.context;
   resume.resolve(); await oldStart;
   assert.equal(engine.running, true); assert.equal(engine.context, context); assert.equal(context.state, 'running');
+});
+
+test('rapid output changes serialize native calls and finish on the last selected device', async t => {
+  const {engine, hooks} = harness(); t.after(() => engine.stop());
+  await engine.start({settings: micFree});
+  const calls = [], pending = [];
+  hooks.sink = (context, id) => {const operation=deferred();calls.push(id);pending.push(()=>{context.sinkId=id;operation.resolve();});return operation.promise;};
+  const first=engine.setOutputDevice('headphones-A'), second=engine.setOutputDevice('speaker-B'), last=engine.setOutputDevice('headphones-A');
+  await turn();assert.deepEqual(calls,['headphones-A']);
+  pending.shift()();await first;await turn();assert.deepEqual(calls,['headphones-A','speaker-B']);
+  pending.shift()();await second;await turn();assert.deepEqual(calls,['headphones-A','speaker-B','headphones-A']);
+  pending.shift()();await last;
+  assert.equal(engine.context.sinkId,'headphones-A');assert.equal(engine.outputDeviceId,'headphones-A');
+});
+
+test('a failed output change preserves the actual device and does not poison later changes', async t => {
+  const {engine, hooks} = harness(); t.after(() => engine.stop());
+  await engine.start({settings:micFree,outputDeviceId:'headphones-A'});
+  hooks.sink=async(context,id)=>{if(id==='missing')throw Error('device missing');context.sinkId=id;};
+  await assert.rejects(engine.setOutputDevice('missing'),/device missing/);
+  assert.equal(engine.outputDeviceId,'headphones-A');
+  await engine.setOutputDevice('default');assert.equal(engine.context.sinkId,'');assert.equal(engine.outputDeviceId,'default');
+  hooks.sink=async()=>{};
+  await assert.rejects(engine.setOutputDevice('headphones-B'),/切替を確認/);
+  assert.equal(engine.outputDeviceId,'default');
+});
+
+test('stop invalidates queued output changes without blocking a replacement session', async t => {
+  const {engine, hooks} = harness(); t.after(() => engine.stop());
+  await engine.start({settings:micFree});const oldContext=engine.context,operation=deferred(),calls=[];
+  hooks.sink=(context,id)=>{calls.push([context,id]);return operation.promise.then(()=>{context.sinkId=id;});};
+  const first=cancelled(engine.setOutputDevice('speaker-B')),queued=cancelled(engine.setOutputDevice('headphones-A'));
+  await turn();await engine.stop();hooks.sink=async(context,id)=>{calls.push([context,id]);context.sinkId=id;};
+  await engine.start({settings:micFree,outputDeviceId:'headphones-C'});const current=engine.context;
+  operation.resolve();await Promise.all([first,queued]);
+  assert.deepEqual(calls.map(([context,id])=>[context===oldContext,id]),[[true,'speaker-B'],[false,'headphones-C']]);
+  assert.equal(engine.context,current);assert.equal(engine.running,true);assert.equal(current.sinkId,'headphones-C');assert.equal(engine.outputDeviceId,'headphones-C');
 });

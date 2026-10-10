@@ -96,7 +96,7 @@ function prepareData(value,{backup=false}={}){
 }
 try { data = prepareData(data); if(!storageBlocked)recoveryRaw=null; }
 catch { storageBlocked=true;storageMessage='保存データが壊れているか、この版では扱えません。元データは残しています。元データを書き出してから、正常なバックアップの復元またはデータの削除を行ってください。';data=emptyData(); }
-let audio = new AssistanceAudioEngine({onPulse:()=>{const pulse=$('#pulse');pulse.classList.add('active');setTimeout(()=>pulse.classList.remove('active'),90);},onFault:reason=>{emergencyStop().then(stopped=>{if(stopped)$('#audioMessage').textContent=reason;});}});
+let audio = new AssistanceAudioEngine({onPulse:()=>{const pulse=$('#pulse');pulse.classList.add('active');setTimeout(()=>pulse.classList.remove('active'),90);},onFault:reason=>{emergencyStop({broadcast:false}).then(stopped=>{if(stopped)$('#audioMessage').textContent=reason;});}});
 let activeProfile = data.profiles[0]?.id || 'meeting';
 let activeConditionName = data.profiles[0]?.name || '未選択';
 let sessionConditionSnapshot = null;
@@ -122,7 +122,7 @@ function profileSummary(profile){if(profile.migrationNote)return '音程の再�
 function renderProfiles(){ const select=$('#profileSelect'); const cards=$('#profileCards'); select.replaceChildren(); cards.replaceChildren(); data.profiles.forEach(p=>{ const o=document.createElement('option'); o.value=p.id;o.textContent=`${p.name}（${p.scene}）`;select.append(o); const card=document.createElement('article');card.className='profile-card';const name=document.createElement('strong'),summary=document.createElement('p'),button=document.createElement('button');name.textContent=p.name;summary.textContent=`${p.scene} · ${profileSummary(p)}`;button.className='secondary';button.dataset.useProfile=p.id;button.textContent='読み込む';card.append(name,summary,button);cards.append(card); }); select.value=activeProfile; renderTrialSelectors(); }
 function escapeHtml(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
 function selectedProfile(){return data.profiles.find(p=>p.id===activeProfile);}
-function stoppedControls(){setStatus('assist','stopped','補助: 停止');setStatus('mic','idle','マイク: 未使用');$('#startAssist').disabled=false;$('#muteAssist').disabled=true;}
+function stoppedControls(){setStatus('assist','stopped','補助: 停止');setStatus('mic','idle','マイク: 未使用');$('#startAssist').disabled=false;$('#muteAssist').disabled=true;$('#outputDevice').disabled=false;}
 async function stopAssistForConditionChange(){if(!audio.running&&!audio.starting)return false;if(!await clearAudio())return null;stoppedControls();return true;}
 async function loadCondition(name,condition){const wasRunning=await stopAssistForConditionChange();if(wasRunning===null)return null;activeConditionName=name;sessionConditionSnapshot=null;applyCondition(condition);return wasRunning;}
 async function applyProfile(id){const p=data.profiles.find(x=>x.id===id);if(!p)return;const wasRunning=await loadCondition(p.name,p.condition);if(wasRunning===null)return;activeProfile=id;$('#profileSelect').value=id;const note=p.migrationNote?` ${p.migrationNote}`:'';toast(`${wasRunning?`補助を停止して「${p.name}」を読み込みました。設定を確認してから補助を開始してください。`:`「${p.name}」を選びました。補助は停止中です。`}${note}`);}
@@ -134,7 +134,7 @@ function gain(value){return Math.pow(10,Number(value)/20);}
 
 async function enumerateDevices(){
   try { const devices=await navigator.mediaDevices.enumerateDevices(); const input=$('#inputDevice'); const current=input.value; input.innerHTML='<option value="default">既定のマイク（ブラウザが選択）</option>'; devices.filter(d=>d.kind==='audioinput').forEach((d,i)=>input.add(new Option(d.label||`マイク ${i+1}`,d.deviceId))); input.value=[...input.options].some(x=>x.value===current)?current:'default';
-    const output=$('#outputDevice'),currentOutput=output.value;output.innerHTML='<option value="default">ブラウザの既定の出力</option>';devices.filter(d=>d.kind==='audiooutput').forEach((d,i)=>output.add(new Option(d.label||`出力 ${i+1}`,d.deviceId)));output.value=[...output.options].some(x=>x.value===currentOutput)?currentOutput:'default';
+    const output=$('#outputDevice');if(output.disabled)return;const liveOutput=audio.running&&typeof audio.context?.setSinkId==='function',currentOutput=liveOutput?audio.outputDeviceId:output.value;output.innerHTML='<option value="default">ブラウザの既定の出力</option>';devices.filter(d=>d.kind==='audiooutput').forEach((d,i)=>output.add(new Option(d.label||`出力 ${i+1}`,d.deviceId)));if(liveOutput&&![...output.options].some(x=>x.value===currentOutput))output.add(new Option('現在の出力先',currentOutput));output.value=[...output.options].some(x=>x.value===currentOutput)?currentOutput:'default';
   } catch { toast('機器一覧を取得できませんでした。ブラウザの権限を確認してください。'); }
 }
 async function prepareAudio(){
@@ -147,11 +147,12 @@ async function startAssist(){
   if(audio.running||audio.starting)return;if(!navigator.mediaDevices?.getUserMedia){toast('このブラウザではライブ補助を利用できません。');return;}
   const request=++assistRequest;
   try{
-    $('#startAssist').disabled=true;
+    $('#startAssist').disabled=true;$('#outputDevice').disabled=true;
     const condition=currentCondition();const result=await audio.start({inputDeviceId:$('#inputDevice').value,outputDeviceId:$('#outputDevice').value,settings:condition});if(request!==assistRequest)return;sessionConditionSnapshot=JSON.parse(JSON.stringify(condition));setStatus('assist','running','補助: 動作中');setStatus('mic',audio.stream?'running':'idle',audio.stream?'マイク: 使用中':'マイク: 未使用');syncControls();$('#startAssist').disabled=true;$('#muteAssist').disabled=false;$('#audioMessage').textContent=result.warnings[0]||'補助音をヘッドホンに再生しています。通話相手への音声は、通話アプリ側でミュートしてください。読み上げ音声はOS／ブラウザの既定の出力先を使います。';
-  }catch(e){if(request!==assistRequest)return;sessionConditionSnapshot=null;setStatus('assist','stopped','補助: 停止');setStatus('mic','idle','マイク: 未使用');$('#startAssist').disabled=false;$('#muteAssist').disabled=true;$('#audioMessage').textContent=({NotAllowedError:'マイクを利用できません。ブラウザのサイト設定でマイク許可を確認してください。',NotFoundError:'マイクが見つかりません。接続と入力機器を確認してください。',NotReadableError:'マイクを開けません。他のアプリによる占有や機器の接続を確認してください。'}[e.name])||e.message||'補助を開始できませんでした。マイク権限、ヘッドホン、他アプリの設定を確認してください。';}
+  }catch(e){if(request!==assistRequest)return;sessionConditionSnapshot=null;stoppedControls();$('#audioMessage').textContent=({NotAllowedError:'マイクを利用できません。ブラウザのサイト設定でマイク許可を確認してください。',NotFoundError:'マイクが見つかりません。接続と入力機器を確認してください。',NotReadableError:'マイクを開けません。他のアプリによる占有や機器の接続を確認してください。'}[e.name])||e.message||'補助を開始できませんでした。マイク権限、ヘッドホン、他アプリの設定を確認してください。';}
+  finally{if(request===assistRequest)$('#outputDevice').disabled=false;}
 }
-function refreshAudio(){if(audio.running&&!audio.muted){try{audio.configure(currentCondition());}catch(e){emergencyStop().then(stopped=>{if(stopped)$('#audioMessage').textContent=e.message;});}}}
+function refreshAudio(){if(audio.running&&!audio.muted){try{audio.configure(currentCondition());}catch(e){emergencyStop({broadcast:false}).then(stopped=>{if(stopped)$('#audioMessage').textContent=e.message;});}}}
 async function muteAssist(){pausePhrase();if(!await clearAudio())return false;stoppedControls();$('#audioMessage').textContent='補助音を停止し、マイクを解放しました。通話のマイクは通話アプリ側で操作してください。';return true;}
 const STOP_STORE = 'stuttersuite.emergency.v1';
 let stopChannel;
@@ -205,14 +206,25 @@ $('#exportRecovery').onclick=()=>{if(recoveryRaw===null)return;const a=document.
 $('#storageBackup').onclick=()=>$('#backupData').click();
 $('#txtImportButton').onclick=()=>$('#txtImport').click();
 $('#restoreDataButton').onclick=()=>$('#restoreData').click();
-$('#refreshDevices').onclick=enumerateDevices;$('#outputDevice').onchange=async e=>{if(audio.running&&typeof audio.context?.setSinkId==='function'){try{await audio.context.setSinkId(e.target.value==='default'?'':e.target.value);toast('補助音の出力先を変更しました。');}catch{toast('この出力先へ変更できませんでした。OSまたはブラウザの既定出力を確認してください。');}}else if(e.target.value!=='default')toast('開始時にこの出力先を適用します。TTSの出力先は切り替えられません。');};
+let outputRequest=0;
+async function changeOutputDevice(){
+  const select=$('#outputDevice'),request=++outputRequest,context=audio.context,session=assistRequest;
+  if(!audio.running||typeof context?.setSinkId!=='function'){if(select.value!=='default')toast('開始時にこの出力先を適用します。TTSの出力先は切り替えられません。');return;}
+  const current=()=>request===outputRequest&&session===assistRequest&&context===audio.context;
+  const showActual=()=>{const id=audio.outputDeviceId;if(![...select.options].some(option=>option.value===id))select.add(new Option('現在の出力先',id));select.value=id;};
+  select.disabled=true;
+  try{await audio.setOutputDevice(select.value);if(current()){showActual();toast('補助音の出力先を変更しました。');}}
+  catch(error){if(current()&&error.name!=='AbortError'){showActual();toast('この出力先へ変更できませんでした。OSまたはブラウザの既定出力を確認してください。');}}
+  finally{if(request===outputRequest)select.disabled=!!audio.starting;}
+}
+$('#refreshDevices').onclick=enumerateDevices;$('#outputDevice').onchange=changeOutputDevice;
 let trial={order:[],index:0,active:false},trialReturnFocus;
 function closeTrial(){const modal=$('#trialModal'),wasOpen=modal.classList.contains('open');modal.classList.remove('open');modal.setAttribute('aria-hidden','true');$('.app-shell').inert=false;if(wasOpen)trialReturnFocus?.focus();}
 function renderTrialSelectors(){const options=[{id:'baseline',name:'補助なし'},...data.profiles.map(p=>({id:p.id,name:p.name}))];['trialProfileA','trialProfileB'].forEach((id,index)=>{const select=$(`#${id}`);if(!select)return;const value=select.value||options[Math.min(index,options.length-1)].id;select.innerHTML='';options.forEach(option=>select.add(new Option(option.name,option.id)));select.value=options.some(option=>option.id===value)?value:options[0].id;});}
 function openTrial(){renderTrialSelectors();trialReturnFocus=document.activeElement;$('#trialModal').classList.add('open');$('#trialModal').setAttribute('aria-hidden','false');$('.app-shell').inert=true;const configuring=!trial.active;['trialProfileA','trialProfileB','trialRandomize'].forEach(id=>$(`#${id}`).disabled=!configuring);$('#trialStartButton').textContent=configuring?'比較を開始':'この条件を準備';$('#trialNext').hidden=configuring;if(configuring){$('#trialStep').textContent='準備';$('#trialCondition').textContent='条件を選んで「比較を開始」を押してください。';}else updateTrial();$('#trialModal .close').focus();}
 async function applyTrialCondition(){const id=trial.order[trial.index];if(id==='baseline')await loadCondition('補助なし',withoutAssistance({...defaultCondition(),mode:'none'}));else await applyProfile(id);if(audio.running||audio.starting)return;sessionConditionSnapshot=JSON.parse(JSON.stringify(currentCondition()));closeTrial();go('assist');toast(`比較 ${trial.index+1}/${trial.order.length} の条件を準備しました。補助はまだ開始していません。`);}
 $('#startTrial').onclick=openTrial;$$('[data-close-modal]').forEach(b=>b.onclick=closeTrial);function updateTrial(){const id=trial.order[trial.index],profile=data.profiles.find(p=>p.id===id);$('#trialStep').textContent=`${trial.index+1} / ${trial.order.length}`;$('#trialCondition').textContent=id==='baseline'?'補助なし':profile?.name||'保存済みの設定';$('#trialNext').textContent=trial.index<trial.order.length-1?'次の条件へ':'比較を終える';}$('#trialStartButton').onclick=async()=>{if(!trial.active){trial.order=[$('#trialProfileA').value,$('#trialProfileB').value];if($('#trialRandomize').checked&&Math.random()<.5)trial.order.reverse();trial.index=0;trial.active=true;}await applyTrialCondition();};$('#trialNext').onclick=()=>{if(trial.index<trial.order.length-1){trial.index++;updateTrial();}else{trial={order:[],index:0,active:false};closeTrial();toast('比較を終えました。必要なら振り返りを残せます。');go('history');}};
-window.addEventListener('keydown',e=>{if(e.key==='Escape'){closeTrial();emergencyStop();return;}if(e.key==='Tab'&&$('#trialModal').classList.contains('open')){const nodes=[...$('#trialModal').querySelectorAll('button:not(:disabled),select:not(:disabled),input:not(:disabled)')].filter(node=>!node.hidden);const first=nodes[0],last=nodes.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}if(e.ctrlKey&&e.altKey){if(e.code==='F12'){e.preventDefault();emergencyStop();}if(e.code==='F9'){e.preventDefault();speaking?pausePhrase():playPhrase();}if(e.code==='F10'){e.preventDefault();nextPhrase();}if(e.code==='F8'){e.preventDefault();previousPhrase();}}});
+window.addEventListener('keydown',e=>{if(e.key==='Escape'){e.preventDefault();if($('#trialModal').classList.contains('open'))closeTrial();else emergencyStop();return;}if(e.key==='Tab'&&$('#trialModal').classList.contains('open')){const nodes=[...$('#trialModal').querySelectorAll('button:not(:disabled),select:not(:disabled),input:not(:disabled)')].filter(node=>!node.hidden);const first=nodes[0],last=nodes.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}if(e.ctrlKey&&e.altKey){if(e.code==='F12'){e.preventDefault();emergencyStop();}if(e.code==='F9'){e.preventDefault();speaking?pausePhrase():playPhrase();}if(e.code==='F10'){e.preventDefault();nextPhrase();}if(e.code==='F8'){e.preventDefault();previousPhrase();}}});
 window.addEventListener('beforeunload',()=>{pausePhrase();audio.stop();stopChannel?.close();});speechSynthesis.onvoiceschanged=loadVoices;renderProfiles();applyCondition(selectedProfile()?.condition||defaultCondition());renderPhrases();renderHistory();loadVoices();enumerateDevices();if(storageBlocked)showStorageNotice(storageMessage);
 
 function updatePitchSupport(){const supported=AssistanceAudioEngine.supportsPitch();for(const node of $$('#pitchA,#pitchB')){node.dataset.unavailable=String(!supported);node.disabled=!supported;node.title=supported?'':'FAFにはHTTPS接続とAudioWorklet対応ブラウザが必要です。';}$('#pitchSupport').textContent=supported?'音程の変更は端末内で処理します。音声の送信・録音保存は行いません。':'この環境では音程を変更できません。HTTPSまたはlocalhostで、AudioWorklet対応ブラウザを使用してください。追加遅延やノイズは利用できます。';}

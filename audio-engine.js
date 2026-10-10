@@ -9,6 +9,7 @@ class AssistanceAudioEngine {
     this.modules = new Map(); this.retired = new Set();
     this.running = this.muted = false; this.generation = 0;
     this.starting = null; this.pitchReady = false;
+    this.outputSwitch = null; this.outputDeviceId = 'default';
   }
 
   static supportsPitch() {
@@ -53,7 +54,7 @@ class AssistanceAudioEngine {
       this.pitchReady = pitchReady;
       if (needsPitch && !this.pitchReady) throw Error('FAFを開始できません。HTTPS接続と対応ブラウザを確認してください。DAFは音程を0にして利用できます。');
       if (typeof context.setSinkId === 'function') {
-        try { await context.setSinkId(outputDeviceId === 'default' ? '' : outputDeviceId); }
+        try { await this.setOutputDevice(outputDeviceId); }
         catch { throw Error('選択した出力先を使えません。ヘッドホンの接続と出力先を確認してください。'); }
       } else if (outputDeviceId !== 'default') {
         warnings.push('このブラウザは出力先切替に対応していません。OS／ブラウザの出力をヘッドホンに設定してください。');
@@ -93,6 +94,28 @@ class AssistanceAudioEngine {
       await this.stop();
       throw error;
     }
+  }
+
+  setOutputDevice(outputDeviceId = 'default') {
+    const context = this.context, generation = this.generation;
+    if (typeof context?.setSinkId !== 'function') return Promise.reject(Error('出力先切替に対応していません。'));
+    const sinkId = outputDeviceId === 'default' ? '' : outputDeviceId;
+    // Serialize native calls: request numbers alone cannot undo a late native switch.
+    const switching = (this.outputSwitch || Promise.resolve()).catch(() => {}).then(async () => {
+      this.checkStart(generation);
+      try { await context.setSinkId(sinkId); }
+      catch (error) {
+        this.checkStart(generation);
+        if (typeof context.sinkId === 'string') this.outputDeviceId = context.sinkId || 'default';
+        throw error;
+      }
+      this.checkStart(generation);
+      this.outputDeviceId = typeof context.sinkId === 'string' ? context.sinkId || 'default' : outputDeviceId;
+      if (typeof context.sinkId === 'string' && context.sinkId !== sinkId) throw Error('出力先の切替を確認できませんでした。');
+      return outputDeviceId;
+    });
+    this.outputSwitch = switching;
+    return switching;
   }
 
   configure(settings) {
@@ -210,6 +233,7 @@ class AssistanceAudioEngine {
   async stop() {
     const generation = ++this.generation;
     this.starting = null; this.running = false; this.muted = true;
+    this.outputSwitch = null; this.outputDeviceId = 'default';
     const context = this.context, stream = this.stream;
     if (this.master && context?.state !== 'closed') this.master.gain.setValueAtTime(0, context.currentTime);
     this.stream = null; stream?.getTracks().forEach(t => t.stop());
